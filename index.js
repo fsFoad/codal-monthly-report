@@ -273,14 +273,15 @@ async function main() {
 
 main().catch((err) => console.error("❌", err));
 */
+// const { fetchAllSymbols } = require("./symbols");
 const XLSX = require("xlsx");
 const fetch = (...args) =>
     import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 // 🔗 آدرس پایه برای سرچ
-const BASE_URL =
-    "https://search.codal.ir/api/search/v2/q?Audited=true&AuditorRef=-1&Category=3&Childs=true&CompanyState=0&CompanyType=1&Consolidatable=true&IndustryGroup=70&IsNotAudited=false&Length=-1&LetterType=-1&Mains=true&NotAudited=true&NotConsolidatable=true&Publisher=false&ReportingType=1000002&TracingNo=-1&search=true";
-function normalizeText(str) {
+const BASE_SYMBOLS =
+    "https://search.codal.ir/api/search/v2/q?Audited=true&AuditorRef=-1&Category=-1&Childs=true&CompanyState=-1&CompanyType=-1&Consolidatable=true&IsNotAudited=false&Length=-1&LetterType=-1&Mains=true&NotAudited=true&NotConsolidatable=true&Publisher=false&ReportingType=-1&TracingNo=-1&search=false";function normalizeText(str) {
+
     if (!str) return "";
     return str
         .replace(/ي/g, "ی") // ی عربی → ی فارسی
@@ -405,6 +406,16 @@ async function parseExcel(url, title) {
 }
 // 🛠 اجرای اصلی
 async function main() {
+    // اول همه نمادها رو بگیر
+    const symbols = await fetchAllSymbols();
+
+    console.log("📋 لیست چند نماد اول:");
+    symbols.slice(0, 20).forEach((s, i) => {
+        console.log(`${i + 1}. ${s.Symbol} - ${s.CompanyName}`);
+    });
+
+    // اینجا ادامه‌ی لاجیک قبلی تو برای گزارش‌ها
+
     const symbol = "وآذر";
     const name = "سرمایه گذاری توسعه آذربایجان";
 
@@ -442,6 +453,49 @@ async function main() {
     XLSX.writeFile(wb, outFile);
 
     console.log(`📊 خروجی ذخیره شد: ${outFile}`);
+}
+async function fetchAllSymbols(limitPages = 100) {
+    let page = 1;
+    let totalPages = limitPages; // پیش‌فرض تا ۱۰۰ صفحه
+    const seen = new Set();
+    const symbols = [];
+
+    do {
+        const url = `${BASE_SYMBOLS}&PageNumber=${page}`;
+        console.log(`📡 Fetching symbols page ${page} ...`);
+        const UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+        const res = await fetch(url, {
+            headers: {
+                Accept: "application/json, text/plain, */*",
+                "User-Agent": UA,
+                Referer: "https://www.codal.ir/",
+                Origin: "https://www.codal.ir",
+            },
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        if (page === 1) {
+            // اگه کل صفحات کمتر از limitPages بود، به همون مقدار محدود بشه
+            totalPages = Math.min(data.Page || 1, limitPages);
+            console.log(`🧾 Total companies: ${data.Total} | Pages: ${data.Page}`);
+            console.log(`⚡ فقط ${totalPages} صفحه اول برای تست خونده میشه`);
+        }
+
+        for (const l of data.Letters || []) {
+            if (!seen.has(l.Symbol)) {
+                seen.add(l.Symbol);
+                symbols.push({ Symbol: l.Symbol, CompanyName: l.CompanyName });
+            }
+        }
+
+        page++;
+    } while (page <= totalPages);
+
+    console.log(`✅ Fetched ${symbols.length} unique symbols (up to ${limitPages} pages)`);
+    return symbols;
 }
 
 main().catch((err) => console.error("❌", err));
