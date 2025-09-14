@@ -4,9 +4,7 @@ const fetch = (...args) =>
 
 const UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
-
-const BASE_SYMBOLS =
-    "https://search.codal.ir/api/search/v2/q?Audited=true&AuditorRef=-1&Category=-1&Childs=true&CompanyState=-1&CompanyType=-1&Consolidatable=true&IsNotAudited=false&Length=-1&LetterType=-1&Mains=true&NotAudited=true&NotConsolidatable=true&Publisher=false&ReportingType=-1&TracingNo=-1&search=false";
+const BASE_SYMBOLS = "https://codal.ir/CompanyList.aspx";
 
 async function fetchAllSymbols() {
     let page = 1;

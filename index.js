@@ -507,10 +507,17 @@ main().catch((err) => console.error("❌", err));
 const readline = require("readline");
 const XLSX = require("xlsx");
 const axios = require("axios");
+const { fetchProductionSymbols } = require("./fetchProductionSymbols")
+const { getSymbolsHtml } = require("./getSymbolsHtml");
 
 /* ========== Utils ========== */
 const UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+
+// 🔹 API مخصوص لیست شرکت‌ها (نمادها)
+const BASE_SYMBOLS =
+    "https://search.codal.ir/api/search/v2/q?Audited=true&AuditorRef=-1&Category=-1&Childs=true&CompanyState=-1&CompanyType=-1&Consolidatable=true&IsNotAudited=false&Length=100&LetterType=-1&Mains=true&NotAudited=true&NotConsolidatable=true&Publisher=false&ReportingType=1000000&TracingNo=-1&search=false";
+
 
 function getNowFilename() {
     const d = new Date();
@@ -546,16 +553,16 @@ function cleanFa(s = "") {
 function rowText(row) {
     return (row || []).map((c) => (c == null ? "" : String(c))).join(" ");
 }
-
 function extractDateFromTitle(title = "") {
-    const m = String(title).match(/([۰-۹]{4}\/[۰-۹]{2}\/[۰-۹]{2}|\d{4}\/\d{2}\/\d{2})/);
+    const m = String(title).match(
+        /([۰-۹]{4}\/[۰-۹]{2}\/[۰-۹]{2}|\d{4}\/\d{2}\/\d{2})/
+    );
     return m ? m[1] : "";
 }
 function periodLabelFromTitle(title = "") {
     const d = extractDateFromTitle(title);
     return d ? `دوره یک ماهه تا تاریخ ${d}` : "";
 }
-
 /* ========== Fetch reports ========== */
 async function fetchCodalReports(symbol) {
     let page = 1,
@@ -565,7 +572,12 @@ async function fetchCodalReports(symbol) {
         const url = `https://search.codal.ir/api/search/v2/q?Audited=true&AuditorRef=-1&Category=3&Childs=true&CompanyState=-1&CompanyType=-1&Consolidatable=true&IsNotAudited=false&Length=-1&LetterType=-1&Mains=true&NotAudited=true&NotConsolidatable=true&PageNumber=${page}&Publisher=false&ReportingType=1000000&Symbol=${encodeURIComponent(
             symbol
         )}&TracingNo=-1&search=true`;
-        const res = await axios.get(url, { headers: { Accept: "application/json, text/plain, */*", "User-Agent": UA } });
+        const res = await axios.get(url, {
+            headers: {
+                Accept: "application/json, text/plain, */*",
+                "User-Agent": UA,
+            },
+        });
         const data = res.data || {};
         if (page === 1) total = data.Total || 0;
         if (Array.isArray(data.Letters)) all.push(...data.Letters);
@@ -588,49 +600,51 @@ function looksLikeGroupRow(row) {
         t.includes("وضعیتمحصول-واحد")
     );
 }
-function findPeriodGroup(rows, targetDate) {
-    const targetDateFa = cleanFa(targetDate);
-    const targetDateEn = cleanFa(fa2enDigits(targetDate));
-    for (let i = 0; i < Math.min(rows.length, 30); i++) {
+
+// ✅ پیدا کردن ستون مخصوص "دوره یک ماهه" (نه از ابتدای سال مالی)
+function findMonthlySalesCol(rows) {
+    for (let i = 0; i < Math.min(rows.length, 20); i++) {
         const r = rows[i] || [];
         for (let c = 0; c < r.length; c++) {
-            const cell = cleanFa(r[c] || "");
-            if (cell.includes("دوره") && cell.includes("ماهه") &&
-                (cell.includes(targetDateFa) || cell.includes(targetDateEn))) {
-                return { groupRowIdx: i, groupColStart: c };
+            const t = cleanFa(r[c] || "");
+
+            if (t.includes("دوره") && t.includes("ماهه")) {
+                // ❌ رد کنیم اگر شامل "ابتدای" یا "سال مالی" باشه
+                if (t.includes("ابتدای") || t.includes("سالمالی")) continue;
+
+                for (let k = i + 1; k <= i + 5 && k < rows.length; k++) {
+                    const rr = rows[k] || [];
+                    for (let cc = c; cc < c + 5 && cc < rr.length; cc++) {
+                        const tt = cleanFa(rr[cc] || "");
+                        if (tt.includes("مبلغ") && tt.includes("فروش")) {
+                            return { col: cc, headerRow: k };
+                        }
+                    }
+                }
             }
         }
     }
-    return { groupRowIdx: -1, groupColStart: -1 };
-}
-function findSalesIdxUnderGroup(rows, groupRowIdx, groupColStart) {
-    for (let h = groupRowIdx + 1; h <= groupRowIdx + 6 && h < rows.length; h++) {
-        const r = rows[h] || [];
-        for (let c = groupColStart; c < groupColStart + 6 && c < r.length; c++) {
-            const cell = cleanFa(r[c] || "");
-            if (cell.includes("مبلغ") && cell.includes("فروش")) {
-                return { headerIdx: h, salesIdx: c };
-            }
-        }
-    }
-    return { headerIdx: -1, salesIdx: -1 };
+    return { col: -1, headerRow: -1 };
 }
 
 /* ========== Parse Excel ========== */
 async function parseExcel(excelUrl, report, symbol) {
-    const res = await axios.get(excelUrl, { responseType: "arraybuffer", headers: { "User-Agent": UA } });
+    const res = await axios.get(excelUrl, {
+        responseType: "arraybuffer",
+        headers: { "User-Agent": UA },
+    });
     const wb = XLSX.read(res.data, { type: "buffer" });
-    const targetDate = extractDateFromTitle(report.Title);
 
     for (const sh of wb.SheetNames) {
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sh], { header: 1, raw: false });
-        const { groupRowIdx, groupColStart } = findPeriodGroup(rows, targetDate);
-        if (groupRowIdx === -1) continue;
-        const { headerIdx, salesIdx } = findSalesIdxUnderGroup(rows, groupRowIdx, groupColStart);
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sh], {
+            header: 1,
+            raw: false,
+        });
+        const { col: salesIdx, headerRow } = findMonthlySalesCol(rows);
         if (salesIdx === -1) continue;
 
         let lastSale = null;
-        for (let j = headerIdx + 1; j < rows.length; j++) {
+        for (let j = headerRow + 1; j < rows.length; j++) {
             const r = rows[j] || [];
             if (looksLikeGroupRow(r)) break;
             if (isExactJamRow(r)) {
@@ -656,14 +670,18 @@ async function parseExcel(excelUrl, report, symbol) {
 async function processSymbol(symbol) {
     console.log(`\n--- بررسی نماد: ${symbol} ---`);
     const letters = await fetchCodalReports(symbol);
-    const monthly = letters.filter((l) => String(l.Title || "").includes("گزارش فعالیت ماهانه"));
+    const monthly = letters.filter((l) =>
+        String(l.Title || "").includes("گزارش فعالیت ماهانه")
+    );
     console.log(`📑 ${symbol}: ${monthly.length} گزارش فعالیت ماهانه پیدا شد`);
 
     const bestByPeriod = new Map();
     for (const l of monthly) {
         const key = periodLabelFromTitle(l.Title);
         if (!key) continue;
-        const ts = fa2enDigits(String(l.PublishDateTime || l.SentDateTime || "")).replace(/[^\d]/g, "");
+        const ts = fa2enDigits(
+            String(l.PublishDateTime || l.SentDateTime || "")
+        ).replace(/[^\d]/g, "");
         const prev = bestByPeriod.get(key);
         if (!prev || ts > prev._ts) bestByPeriod.set(key, { ...l, _ts: ts });
     }
@@ -681,9 +699,14 @@ async function processSymbol(symbol) {
 
 /* ========== Choose symbols ========== */
 async function chooseSymbols() {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
     const ask = (q) => new Promise((res) => rl.question(q, res));
-    const opt = await ask("گزینه را انتخاب کنید (1: گرفتن از فایل symbols.xlsx / 2: نمونه تست): ");
+    const opt = await ask(
+        "گزینه را انتخاب کنید (1: از فایل symbols.xlsx / 2: تست / 3: لیست تولیدی): "
+    );
     rl.close();
 
     if (opt === "1") {
@@ -691,7 +714,9 @@ async function chooseSymbols() {
             const wb = XLSX.readFile("symbols.xlsx");
             const sh = wb.Sheets[wb.SheetNames[0]];
             const data = XLSX.utils.sheet_to_json(sh);
-            const syms = data.map((r) => r.symbol || r.Symbol || r["نماد"]).filter(Boolean);
+            const syms = data
+                .map((r) => r.symbol || r.Symbol || r["نماد"])
+                .filter(Boolean);
             console.log("📋 نمادهای خوانده‌شده:", syms);
             return syms;
         } catch (e) {
@@ -699,15 +724,109 @@ async function chooseSymbols() {
             return [];
         }
     } else if (opt === "2") {
-        return ["کورز"]; // تست
+        try {
+            const wb = XLSX.readFile("symbols.xlsx");
+            const sh = wb.Sheets[wb.SheetNames[0]];
+            const data = XLSX.utils.sheet_to_json(sh);
+            const syms = data
+                .map((r) => r.symbol || r.Symbol || r["نماد"])
+                .filter(Boolean);
+
+// حذف تکراری‌ها
+            const uniqueSyms = [...new Set(syms)];
+
+            console.log("📋 نمادهای خوانده‌شده:", uniqueSyms);
+            return uniqueSyms;
+        } catch (e) {
+            console.error("❌ خطا در خواندن symbols.xlsx:", e.message);
+            return [];
+        }
+    } else if (opt === "3") {
+        console.log("👉 Start fetching production symbols (HTML scraping)...");
+        const companies = await getSymbolsHtml(2); // مثلا ۲ صفحه برای تست
+        console.log("✅ Done. Total:", companies.length);
+        return companies.map((c) => c.symbol);
+        return [];
     } else {
         console.log("گزینه نامعتبر!");
         return [];
     }
 }
 
+/*async function fetchProductionSymbols() {
+    const all = await fetchAllSymbols(200); // 200 صفحه اول
+    const filtered = all.filter((s) =>
+        (s.CompanyType || "").includes("تولیدی")
+    );
+
+    console.log(`✅ Found ${filtered.length} تولیدی company symbols`);
+
+    if (!filtered.length) return;
+
+    try {
+        const outFile = "symbols.xlsx";
+        const data = filtered.map((f) => ({ symbol: f.Symbol }));
+
+        const ws = XLSX.utils.json_to_sheet(data);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Symbols");
+
+        XLSX.writeFile(wb, outFile);
+        console.log("📊 Saved to:", outFile);
+    } catch (err) {
+        if (err.code === "EBUSY" || err.code === "EPERM") {
+            console.error("❌ symbols.xlsx is open. Please close it and try again.");
+        } else {
+            console.error("❌ Error saving Excel:", err.message);
+        }
+    }
+}*/
+
+async function fetchAllSymbols(limitPages = 2) { // برای تست فقط 2 صفحه بگیر
+    let page = 1;
+    let totalPages = limitPages;
+    const symbols = [];
+
+    do {
+        const url = `https://search.codal.ir/api/search/v2/q?PageNumber=${page}&PageSize=100&CompanyState=-1&Childs=true&Audited=true&NotAudited=true&Mains=true`;
+        console.log(`📡 Fetching symbols page ${page} ...`);
+
+        const res = await axios.get(url, {
+            headers: { "User-Agent": UA, Accept: "application/json" },
+        });
+
+        if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+        const data = res.data;
+
+        if (page === 1) {
+            totalPages = Math.min(data.Page || 1, limitPages);
+            console.log(`🧾 Total companies: ${data.Total} | Pages: ${totalPages}`);
+            // 🟢 لاگ از اولین آیتم
+            if (data.Letters && data.Letters.length > 0) {
+                console.log("🔍 نمونه اولین Letter:", data.Letters[0]);
+            }
+        }
+
+        if (Array.isArray(data.Letters)) {
+            symbols.push(
+                ...data.Letters.map((l) => ({
+                    Symbol: l.Symbol,
+                    CompanyName: l.CompanyName,
+                    CompanyType: l.CompanyTypeName || "",
+                }))
+            );
+        }
+
+        page++;
+    } while (page <= totalPages);
+
+    return symbols;
+}
+
 /* ========== Main ========== */
 (async function main() {
+    // await fetchProductionSymbols();
+/*
     const symbols = await chooseSymbols();
     if (!symbols.length) {
         console.log("⛔ نمادی انتخاب نشد");
@@ -723,12 +842,41 @@ async function chooseSymbols() {
         console.log("⛔ هیچ داده‌ای پیدا نشد");
         return;
     }
+*/
 
-    const ws = XLSX.utils.json_to_sheet(all);
+    const symbols = await chooseSymbols();  // 🟢 از کاربر بپرس
+    if (!symbols.length) {
+        console.log("⛔ نمادی انتخاب نشد");
+        return;
+    }
+
+    const allReports = [];
+
+    for (const sym of symbols) {
+        console.log(`\n--- بررسی نماد: ${sym} ---`);
+        try {
+            const reports = await processSymbol(sym); // همون که گزارش‌های یک نماد رو میاره
+            console.log(`📑 ${sym}: ${reports.length} گزارش فعالیت ماهانه پیدا شد`);
+            allReports.push(...reports);
+        } catch (err) {
+            console.error(`❌ خطا در پردازش ${sym}:`, err.message);
+        }
+    }
+
+    if (!allReports.length) {
+        console.log("⛔ هیچ گزارشی برای خروجی وجود ندارد");
+        return;
+    }
+
+    const ws = XLSX.utils.json_to_sheet(allReports);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Reports");
-    const out = getNowFilename();
-    XLSX.writeFile(wb, out);
-    console.log("✅ خروجی ذخیره شد:", out);
-})();
+    XLSX.utils.book_append_sheet(wb, ws, "Sales");
 
+    const fileName = `codal_sales_${new Date()
+        .toISOString()
+        .replace(/[:T]/g, "-")
+        .slice(0, 19)}.xlsx`;
+
+    XLSX.writeFile(wb, fileName);
+    console.log(`✅ خروجی ذخیره شد: ${fileName}`);
+})();
